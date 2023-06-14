@@ -1,0 +1,142 @@
+---
+title: "Full Report"
+author: "Tarasova S.A."
+date: "2023-06-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Подготовка
+```{r}
+library(dplyr)
+library(arrow)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+```
+
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+dataset <- arrow::read_csv_arrow("traffic_security.csv",schema = schema(timestamp=int64(),src=utf8(),dst=utf8(),port=uint32(),bytes=uint32()))
+```
+
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+dataset1 <- arrow::read_csv_arrow("traffic_security.csv",schema = schema(timestamp=int64(),src=utf8(),dst=utf8(),port=uint32(),bytes=uint32()))
+```
+
+## Задание 1: Найдите утечку данных из Вашей сети
+
+### Определение IP-адреса, который пересылает больше информации на внешние ресурсы:
+
+```{r}
+filter(dataset,str_detect(src,"^((12|13|14)\\.)"),
+         str_detect(dst,"^((12|13|14)\\.)",negate=TRUE)) %>% 
+  select(src,bytes) %>%
+  group_by(src)%>% 
+  summarise(bytes=sum(bytes))%>%
+  slice_max(bytes)%>%
+  select(src)
+```
+
+## Задание 2: Надите утечку данных 2
+
+### Другой атакующий установил автоматическую задачу в системном планировщике cron для экспорта содержимого внутренней wiki системы. Эта система генерирует большое количество траффика в нерабочие часы, больше чем остальные хосты. Определите IP этой системы. Известно, что ее IP адрес отличается от нарушителя из предыдущей задачи.
+
+###  Нерабочим временем будем считать интервал с 0:00 по 15:00, так как там наименьшая активность по сравнению с интервалом с 16:00 по 24:00, что видно ниже:
+
+```{r}
+dataset$timestamp_seconds <- dataset$timestamp / 1000
+dataset$timestamp <- as.POSIXct(dataset$timestamp_seconds, origin = "1970-01-01", tz = "Europe/Moscow")
+dataset$hour <-  format(dataset$timestamp, format = "%H")
+dataset$minutes <- format(dataset$timestamp, format = "%M")
+```
+
+```{r}
+ahours <- dataset %>% group_by(hour) %>% summarise(N = n())
+select(arrange(ahours,desc(N)),N,hour)
+```
+
+### Определим нужный нам IP-адрес:
+
+```{r}
+dataset1 %>%
+  select(timestamp, src, dst, bytes) %>%
+   filter(src != "13.37.84.125") %>%
+  mutate(outside_traffic = (str_detect(src,"^((12|13|14)\\.)") & !str_detect(dst,"^((12|13|14)\\.)")), hour = hour(as_datetime(timestamp/1000))) %>%
+  filter(outside_traffic == TRUE, hour >= 0 & hour <= 15) %>%
+  group_by(src) %>%
+  summarise(total_bytes = sum(bytes),) %>%
+  arrange(desc(total_bytes)) %>%
+  head(1) %>%
+  collect()
+```
+
+
+## Задание 3: Найдите утечку данных 3
+### Еще один нарушитель собирает содержимое электронной почты и отправляет в Интернет используя порт, который обычно используется для другого типа трафика. Атакующий пересылает большое количество информации используя этот порт, которое нехарактерно для других хостов, использующих этот номер порта. Определите IP этой системы. Известно, что ее IP адрес отличается от нарушителей из предыдущих задач.
+
+### Нужно найти только те порты, на которые отправлено меньше всего данных
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+dataset %>%
+  select(src, dst, bytes,port) %>%
+  mutate(outside_traffic = (str_detect(src,"^((12|13|14)\\.)") & !str_detect(dst,"^((12|13|14)\\.)"))) %>%
+  filter(outside_traffic == TRUE) %>%
+  group_by(port) %>%
+  summarise(total_data=sum(bytes)) %>%
+  filter(total_data < 5*10^9) %>%
+  select(port) %>%
+  collect() -> ports
+
+ports <- unlist(ports)
+ports <- as.vector(ports,'numeric')
+```
+
+
+### Выбираем данные с нужными номерами портов
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+dataset %>%
+  select(src, dst, bytes,port) %>%
+  mutate(outside_traffic = (str_detect(src,"^((12|13|14)\\.)") & !str_detect(dst,"^((12|13|14)\\.)"))) %>%
+  filter(outside_traffic == TRUE) %>%
+  filter(port %in% ports) %>%
+  group_by(src,port) %>%
+  summarise(total_bytes=sum(bytes)) %>%
+  arrange(desc(port)) %>%
+  collect() -> df
+
+```
+
+
+### Порты с маскимальным кол-вом данных
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+df %>%
+  group_by(src, port) %>%
+  summarise(total_data=sum(total_bytes)) %>%
+  arrange(desc(total_data)) %>%
+  head(10) %>%
+  collect()
+```
+
+
+### Количество хостов к портам
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+df %>%
+  group_by(port) %>%
+  summarise(hosts=n()) %>%
+  arrange(hosts) %>%
+  head(10) %>%
+  collect()
+```
+
+
+### Из предыдущих шагов следует вывод, что ip-адрес злоумышленника 12.55.77.96, а порт 31, т.к. из таблицы в 5 пункте видно, что 31 порт использовал только 1 хост и в тоже время из таблицы в 4 пункте видно, что больше всего данных было передано именно по этому порту 
+```{r,warning=FALSE, message=FALSE, error=FALSE}
+df %>%
+  filter(port == 31) %>%
+  group_by(src) %>%
+  summarise(total_data=sum(total_bytes)) %>%
+  collect()
+```
+
+### Ответ: 12.55.77.96
